@@ -1,0 +1,12 @@
+# Derived artefacts live under $EDGE_ROOT on scratch, never in the repo.
+results/
+logs/
+outputs/
+*.npz
+*.npy
+*.safetensors
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.ruff_cache/

@@ -1,0 +1,38 @@
+[project]
+name = "infer-alpamayo-edge"
+version = "0.0.1"
+description = "Alpamayo 2 Edge inference on H100: sliding-window minADE and per-stage latency"
+requires-python = "==3.12.*"
+dependencies = [
+  # NVIDIA's standalone inference package, pinned to the commit this project was written against.
+  "alpamayo2-edge[dataset] @ git+https://github.com/NVlabs/alpamayo2-edge.git@02f55a7aeabc1a2b9f7a80445c08e40bddc89f5e",
+  # The versions alpamayo2-edge locks (transformers 5.17 carries the Cosmos3-Edge backbone).
+  "torch==2.8.0",
+  "torchvision==0.23.0",
+  "transformers==5.17.0",
+  "physical-ai-av==0.2.0",
+  "numpy>=2.0",
+  "scipy>=1.16.0",
+  "pandas>=2.2",
+  "pyarrow>=17",
+  "hf_transfer>=0.1.9",
+  # FlashAttention 2, needed by --mode compile/tuned and --attn flash_attention_2. The prebuilt
+  # wheel NVIDIA validated for torch 2.8 / CUDA 12 / Python 3.12 (needs glibc >= 2.32).
+  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["infer_edge*"]
+
+[dependency-groups]
+dev = ["ruff>=0.9.0"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
