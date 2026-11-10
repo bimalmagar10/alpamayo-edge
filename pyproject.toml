@@ -16,6 +16,7 @@ dependencies = [
   "pandas>=2.2",
   "pyarrow>=17",
   "hf_transfer>=0.1.9",
+  "matplotlib>=3.10",
   # FlashAttention 2, needed by --mode compile/tuned and --attn flash_attention_2. The prebuilt
   # wheel NVIDIA validated for torch 2.8 / CUDA 12 / Python 3.12 (needs glibc >= 2.32).
   "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",

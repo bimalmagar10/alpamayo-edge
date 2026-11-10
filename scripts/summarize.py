@@ -34,13 +34,16 @@ def main() -> None:
         if "mean_ms" not in d:
             continue
         model = os.path.basename(os.path.dirname(path))
-        groups[(model, d.get("mode") or d.get("step"))].append(d)
+        s = d.get("settings", {})
+        traj = s.get("num_traj_sets", 1) * s.get("num_traj_samples", 1)
+        groups[(model, d.get("mode") or d.get("step"), traj)].append(d)
 
     rows = []
-    for (model, mode), runs in sorted(groups.items()):
-        row = {"model": model, "mode": mode, "clips": len(runs),
+    for (model, mode, traj), runs in sorted(groups.items()):
+        row = {"model": model, "mode": mode, "traj": traj, "clips": len(runs),
                "windows": int(sum(r["n"] for r in runs)),
                "min_ade": np.mean([r["mean_min_ade"] for r in runs]),
+               "ade": np.mean([r.get("mean_ade", r["mean_min_ade"]) for r in runs]),
                "mean_ms": np.mean([r["mean_ms"] for r in runs]),
                "median_ms": np.mean([r["median_ms"] for r in runs]),
                "p90_ms": np.mean([r["p90_ms"] for r in runs]),
@@ -49,8 +52,8 @@ def main() -> None:
             row[s] = np.mean([r.get("stage_ms", {}).get(s, 0.0) for r in runs])
         rows.append(row)
 
-    cols = ["model", "mode", "clips", "windows", "min_ade", "mean_ms", "median_ms", "p90_ms",
-            "tokens", *STAGES]
+    cols = ["model", "mode", "traj", "clips", "windows", "min_ade", "ade", "mean_ms",
+            "median_ms", "p90_ms", "tokens", *STAGES]
     widths = {c: max(len(c), *(len(_fmt(r[c])) for r in rows)) for c in cols} if rows else {}
     print("  ".join(c.rjust(widths[c]) for c in cols))
     for r in rows:

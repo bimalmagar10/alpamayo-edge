@@ -3,15 +3,20 @@
     python scripts/infer.py                               # eager, the released model
     python scripts/infer.py --mode tuned                  # torch.compile + CUDA graphs (needs flash-attn)
     python scripts/infer.py --clip-id <uuid> --num-steps 20 --warmup-steps 2
+    python scripts/infer.py --num-traj-samples 1          # one candidate count only (default: 1 and 6)
 
-Writes results/<model>/<run>_<clip8>.json (metrics, settings, every window's CoT) and
-<run>_<clip8>_reference.npy (predicted xy per window) next to a _gt.npy of the ground truth.
+Every candidate count in --num-traj-samples is run over the same windows and written to
+results/<model>/<mode>_<clip8>_n<k>.json (metrics, settings, every window's CoT) with
+_reference.npy (predicted xy per window) and _gt.npy (ground truth). At the end
+scripts/plot_results.py draws per-stage latency, per-window latency and minADE / ADE of
+all counts into results/<model>/figures/<mode>_<clip8>.png (+ .csv).
 """
 
 import argparse
 import json
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -24,6 +29,9 @@ from alpamayo2_edge.helper import prepare_model_inputs, to_device
 
 from infer_edge.data import MIN_T0_US, load_window, min_ade
 from infer_edge.timing import STAGES, StageTimer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from plot_results import plot_runs  # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -60,46 +68,49 @@ def create_inputs(model: torch.nn.Module, args: argparse.Namespace) -> list[dict
 
 
 @torch.inference_mode()
-def run_window(model: torch.nn.Module, window: dict, args: argparse.Namespace) -> tuple:
-    """One rollout, seeded like NVIDIA's CLI. Returns (minADE, pred xy, CoT text, #tokens)."""
+def run_window(model: torch.nn.Module, window: dict, args: argparse.Namespace,
+               num_traj_samples: int) -> tuple:
+    """One rollout, seeded like NVIDIA's CLI. Returns (minADE, ADE, pred xy, CoT, #tokens)."""
     torch.manual_seed(args.seed)
     generator = torch.Generator(device=args.device).manual_seed(args.seed)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         xyz, _, _, extra = model.sample_trajectories_from_data(
             to_device(window["inputs"], device=args.device),
             num_traj_sets=args.num_traj_sets,
-            num_traj_samples=args.num_traj_samples,
+            num_traj_samples=num_traj_samples,
             top_p=SETTINGS["top_p"], top_k=SETTINGS["top_k"], temperature=SETTINGS["temperature"],
             max_generation_length=args.max_new_tokens,
             diffusion_kwargs={"inference_step": args.diffusion_steps, "generator": generator},
             return_extra=True,
         )
-    ade, best = min_ade(window["gt_xyz"], xyz)
+    best_ade, best, mean_ade = min_ade(window["gt_xyz"], xyz)
     cots = np.asarray(extra["cot"]).reshape(-1)
     tokens = int((extra["generated_ids"][best] >= 0).sum())
     pred = xyz.detach().float().cpu().numpy()[0].reshape(-1, xyz.shape[-2], 3)[..., :2]
-    return ade, pred, str(cots[best]), tokens
+    return best_ade, mean_ade, pred, str(cots[best]), tokens
 
 
 def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer,
                   args: argparse.Namespace, out_dir: str, run_name: str,
-                  accel: Any = None) -> None:
-    logger.info("Warmup (%d windows)", args.warmup_steps)
+                  num_traj_samples: int, accel: Any = None) -> dict:
+    """Warm up, time every window with ``num_traj_samples`` candidates, save and return the record."""
+    logger.info("Warmup (%d windows, %d candidates)", args.warmup_steps, num_traj_samples)
     for window in windows[: args.warmup_steps]:
-        run_window(model, window, args)
+        run_window(model, window, args, num_traj_samples)
     logger.info("Warmup completed")
 
-    min_ades, latencies, stages, traj, gts, cots, tokens = [], [], [], [], [], [], []
+    min_ades, ades, latencies, stages, traj, gts, cots, tokens = [], [], [], [], [], [], [], []
     for idx, window in enumerate(windows[args.warmup_steps :], args.warmup_steps + 1):
         timer.start()
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        ade, pred, cot, n_tokens = run_window(model, window, args)
+        ade, mean_ade, pred, cot, n_tokens = run_window(model, window, args, num_traj_samples)
         torch.cuda.synchronize()
         wall = (time.perf_counter() - t0) * 1000.0
         stages.append(timer.stop(wall))
         latencies.append(wall)
         min_ades.append(ade)
+        ades.append(mean_ade)
         traj.append(pred)
         gts.append(window["gt_xyz"].numpy()[0, :, :2])
         cots.append(cot)
@@ -110,7 +121,8 @@ def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer
 
     n = len(latencies)
     stage = {k: float(np.mean([s[k] for s in stages])) for k in STAGES}
-    logger.info("Average MinADE: %.4f", np.mean(min_ades))
+    logger.info("Average MinADE: %.4f | Average ADE: %.4f (%d candidates)",
+                np.mean(min_ades), np.mean(ades), num_traj_samples)
     logger.info("LATENCY_SUMMARY ms: mean=%.1f median=%.1f min=%.1f p90=%.1f n=%d",
                 np.mean(latencies), np.median(latencies), np.min(latencies),
                 np.percentile(latencies, 90), n)
@@ -127,15 +139,17 @@ def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer
         "settings": {**SETTINGS, "seed": args.seed, "max_generation_length": args.max_new_tokens,
                      "diffusion_steps": args.diffusion_steps,
                      "num_traj_sets": args.num_traj_sets,
-                     "num_traj_samples": args.num_traj_samples},
+                     "num_traj_samples": num_traj_samples},
         "nav_text": args.nav_text or "oracle",
         "mean_min_ade": float(np.mean(min_ades)),
+        "mean_ade": float(np.mean(ades)),
         "mean_ms": float(np.mean(latencies)),
         "median_ms": float(np.median(latencies)),
         "p90_ms": float(np.percentile(latencies, 90)),
         "stage_ms": stage,
         "mean_tokens": float(np.mean(tokens)),
         "min_ades": min_ades,
+        "ades": ades,
         "latencies_ms": latencies,
         "tokens": tokens,
         "stage_ms_per_window": {k: [s[k] for s in stages] for k in STAGES},
@@ -150,6 +164,7 @@ def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer
         json.dump(record, fh, indent=2)
     logger.info("Saved %s/%s.json, %s_reference.npy and %s_gt.npy", out_dir, run_name,
                 run_name, run_name)
+    return record
 
 
 def main() -> None:
@@ -176,8 +191,9 @@ def main() -> None:
                         help="initial windows excluded from the metrics (compile/tuned build "
                              "their graphs there)")
     parser.add_argument("--num-traj-sets", type=int, default=1)
-    parser.add_argument("--num-traj-samples", type=int, default=1,
-                        help="candidates per set, each with its own CoT; minADE is the best")
+    parser.add_argument("--num-traj-samples", type=int, nargs="+", default=[1, 6],
+                        help="candidates per set, each with its own CoT; every count listed is "
+                             "run over the same windows (minADE = best candidate, ADE = mean)")
     parser.add_argument("--nav-text", default=None,
                         help="fixed navigation instruction for every window (default: the "
                              "oracle instruction derived from the ground-truth future)")
@@ -193,6 +209,7 @@ def main() -> None:
     parser.add_argument("--out-dir", default=None,
                         help="default results/<model basename>")
     parser.add_argument("--run-name", default=None, help="default <mode>[_fa2]")
+    parser.add_argument("--no-plot", action="store_true", help="skip the figure at the end")
     args = parser.parse_args()
     if args.no_cache:
         args.cache_dir = None
@@ -226,7 +243,11 @@ def main() -> None:
     run_name = f"{run_name}_{args.clip_id[:8]}"
     out_dir = args.out_dir or os.path.join(
         RESULTS_DIR, os.path.basename(args.model_path.rstrip("/")) or "model")
-    run_benchmark(model, windows, timer, args, out_dir, run_name, accel)
+    records = [run_benchmark(model, windows, timer, args, out_dir, f"{run_name}_n{k}", k, accel)
+               for k in args.num_traj_samples]
+    if not args.no_plot:
+        fig = plot_runs(records, os.path.join(out_dir, "figures", f"{run_name}.png"))
+        logger.info("Saved %s and its .csv", fig)
 
 
 if __name__ == "__main__":

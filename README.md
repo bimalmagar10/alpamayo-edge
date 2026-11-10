@@ -14,9 +14,10 @@ infer_edge/data.py        a window: NVIDIA's raw sample + ground-truth future, .
 infer_edge/timing.py      CUDA-event stage timers hooked on the model's own calls
 scripts/infer.py          the benchmark (one clip, one mode)
 scripts/download_clips.py pre-fill the window cache for N clips (no GPU needed)
+scripts/plot_results.py   figure per run: per-stage latency, latency per window, minADE / ADE (infer.py calls it)
 scripts/run_clips.sh      infer.py over the first N eval clips x modes, then summarize
 scripts/summarize.py      one table over results/ (and flashdrive's result files, if wanted)
-results/<model>/          <mode>_<clip8>.json, _reference.npy (pred xy), _gt.npy
+results/<model>/          <mode>_<clip8>_n<k>.json, _reference.npy (pred xy), _gt.npy; figures/<mode>_<clip8>.png + .csv
 ```
 
 ## Setup (H100 node, once)
@@ -47,17 +48,24 @@ python scripts/infer.py                                     # eager: the release
 python scripts/infer.py --mode compile                      # NVIDIA --accel compile (torch.compile + CUDA graphs)
 python scripts/infer.py --mode tuned                        # NVIDIA --accel tuned (also autotunes decode)
 python scripts/infer.py --attn flash_attention_2            # eager with FlashAttention 2
-python scripts/infer.py --num-traj-samples 6                # 6 CoT + trajectory candidates, minADE = best
+python scripts/infer.py --num-traj-samples 1                # one candidate count only (default runs 1 and 6)
+python scripts/plot_results.py results/Alpamayo2-Edge/tuned_87147a1b_n*.json   # redraw a figure
 python scripts/infer.py --nav-text "Go straight"            # fixed instruction instead of the oracle
 bash scripts/run_clips.sh                                   # 10 clips x {eager, tuned}; NUM_CLIPS=100 MODES=... to change
 python scripts/summarize.py                                 # table over results/
 python scripts/summarize.py --compare ../rt-alapamyo/h100/flashdrive/results/*/*.json
 ```
 
-Each run logs every window's chain of causation, minADE, token count and latency, then a
-`LATENCY_SUMMARY` and `STAGE` lines, and writes `results/<model>/<mode>_<clip8>.json` with
-the per-window arrays, the settings, the navigation texts, the CoTs and (accelerated modes)
-NVIDIA's graph-build and fallback report.
+By default a run goes over the clip twice on the same prepared windows: once with one
+candidate and once with six (each candidate samples its own chain of causation and
+trajectory). Every window logs its chain of causation, minADE, token count and latency,
+then a `LATENCY_SUMMARY` and `STAGE` lines, and each count writes
+`results/<model>/<mode>_<clip8>_n<k>.json` with the per-window arrays, the settings, the
+navigation texts, the CoTs and (accelerated modes) NVIDIA's graph-build and fallback report.
+minADE is the best candidate's ADE and ADE the mean candidate's; with one candidate they
+are equal. At the end `scripts/plot_results.py` draws
+`results/<model>/figures/<mode>_<clip8>.png` (per-stage latency per count, latency per
+window, minADE / ADE per count) and the same numbers as a `.csv`. `--no-plot` skips it.
 
 ### Window cache
 

@@ -145,13 +145,14 @@ def load_window(
     }
 
 
-def min_ade(gt_future_xyz: torch.Tensor, pred_xyz: torch.Tensor) -> tuple[float, int]:
-    """(min ADE in metres, index of that candidate) over every set x sample of ``pred_xyz``.
+def min_ade(gt_future_xyz: torch.Tensor, pred_xyz: torch.Tensor) -> tuple[float, int, float]:
+    """(min ADE, index of that candidate, mean ADE) over every set x sample of ``pred_xyz``.
 
     ``gt_future_xyz`` is [1, 64, 3]; ``pred_xyz`` is [1, sets, samples, 64, 3]. ADE is the mean
-    xy distance over the 64 waypoints, as in flashdrive's scorer.
+    xy distance over the 64 waypoints, as in flashdrive's scorer; minADE is the best candidate
+    and the mean ADE the average candidate (equal with one candidate).
     """
     gt = gt_future_xyz.detach().float().cpu().numpy()[0, :, :2]
     pred = pred_xyz.detach().float().cpu().numpy()[0].reshape(-1, FUTURE_STEPS, 3)[..., :2]
     ade = np.linalg.norm(pred - gt[None], axis=-1).mean(-1)
-    return float(ade.min()), int(ade.argmin())
+    return float(ade.min()), int(ade.argmin()), float(ade.mean())
