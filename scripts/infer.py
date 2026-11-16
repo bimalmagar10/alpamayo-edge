@@ -61,7 +61,8 @@ torch.set_float32_matmul_precision("high")
 
 RESULTS_DIR = "results"
 MODES = ("eager", "compile", "tuned")  # eager: as released; compile/tuned: NVIDIA's --accel
-COT_CONDITIONS = ("full", "empty")  # the CoT test: the model's own CoT / no CoT at all
+COT_CONDITIONS = ("full", "empty")
+NOMINAL = "<NOMINAL>"  # the model's adaptive-reasoning answer: no chain of causation  # the CoT test: the model's own CoT / no CoT at all
 # NVIDIA's CLI defaults (alpamayo2_edge.inference), so eager runs reproduce its outputs.
 SETTINGS = dict(seed=43, top_p=0.98, top_k=None, temperature=0.6,
                 max_generation_length=256, diffusion_steps=10)
@@ -94,12 +95,15 @@ def create_inputs(model: torch.nn.Module, args: argparse.Namespace,
 
 @torch.inference_mode()
 def run_window(model: torch.nn.Module, window: dict, args: argparse.Namespace,
-               num_traj_samples: int) -> tuple:
-    """One rollout, seeded like NVIDIA's CLI.
+               num_traj_samples: int, index: int) -> tuple:
+    """One rollout, seeded like NVIDIA's CLI but per window: ``--seed`` + window index, so the
+    first sampling draw (reason or <NOMINAL>) and the expert noise differ from window to window
+    yet are identical for the full and empty conditions of the same window.
 
     Returns (minADE, ADE, pred xy, CoT text, #tokens, CoT token ids) of the best candidate."""
-    torch.manual_seed(args.seed)
-    generator = torch.Generator(device=args.device).manual_seed(args.seed)
+    seed = args.seed + index
+    torch.manual_seed(seed)
+    generator = torch.Generator(device=args.device).manual_seed(seed)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         xyz, _, _, extra = model.sample_trajectories_from_data(
             to_device(window["inputs"], device=args.device),
@@ -162,7 +166,7 @@ def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer
     logger.info("Warmup (%d windows, %d candidates)", args.warmup_steps, num_traj_samples)
     cot_ids, cot_text = {}, {}
     for w, window in enumerate(windows[: args.warmup_steps]):
-        *_, cot, _, ids = run_window(model, window, args, num_traj_samples)
+        *_, cot, _, ids = run_window(model, window, args, num_traj_samples, w)
         cot_ids[w], cot_text[w] = ids, cot
     logger.info("Warmup completed")
 
@@ -172,7 +176,7 @@ def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         ade, mean_ade, pred, cot, n_tokens, ids = run_window(model, window, args,
-                                                             num_traj_samples)
+                                                             num_traj_samples, idx - 1)
         cot_ids[idx - 1], cot_text[idx - 1] = ids, cot
         torch.cuda.synchronize()
         wall = (time.perf_counter() - t0) * 1000.0
@@ -190,6 +194,10 @@ def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer
 
     n = len(latencies)
     stage = {k: float(np.mean([s[k] for s in stages])) for k in STAGES}
+    nominal = [c.strip() == NOMINAL for c in cots]
+    n_nominal = int(sum(nominal))
+    logger.info("Adaptive reasoning: %d/%d windows <NOMINAL> (no chain of causation)",
+                n_nominal, n)
     logger.info("Average MinADE: %.4f | Average ADE: %.4f (%d candidates)",
                 np.mean(min_ades), np.mean(ades), num_traj_samples)
     logger.info("LATENCY_SUMMARY ms: mean=%.1f median=%.1f min=%.1f p90=%.1f n=%d",
@@ -217,6 +225,16 @@ def run_benchmark(model: torch.nn.Module, windows: list[dict], timer: StageTimer
         "p90_ms": float(np.percentile(latencies, 90)),
         "stage_ms": stage,
         "mean_tokens": float(np.mean(tokens)),
+        "n_nominal": n_nominal,
+        "mean_min_ade_nominal": float(np.mean([a for a, m in zip(min_ades, nominal) if m]))
+        if n_nominal else None,
+        "mean_min_ade_reasoned": float(np.mean([a for a, m in zip(min_ades, nominal) if not m]))
+        if n_nominal < n else None,
+        "mean_ms_nominal": float(np.mean([t for t, m in zip(latencies, nominal) if m]))
+        if n_nominal else None,
+        "mean_ms_reasoned": float(np.mean([t for t, m in zip(latencies, nominal) if not m]))
+        if n_nominal < n else None,
+        "nominal": nominal,
         "min_ades": min_ades,
         "ades": ades,
         "latencies_ms": latencies,

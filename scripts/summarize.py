@@ -4,7 +4,9 @@
     python scripts/summarize.py --compare ../flashdrive/results/*.json   # other runs too
 
 flashdrive's result files share the keys (its "step" is this project's "mode"), so they
-line up in the same table.
+line up in the same table. The nominal / ade_nom / ade_rsn / ms_nom / ms_rsn columns split an
+Edge run by the model's adaptive reasoning: windows answered <NOMINAL> (no chain of
+causation) against windows with a written one; blank for runs without that field.
 """
 
 import argparse
@@ -54,13 +56,19 @@ def main() -> None:
                "mean_ms": np.mean([r["mean_ms"] for r in runs]),
                "median_ms": np.mean([r["median_ms"] for r in runs]),
                "p90_ms": np.mean([r["p90_ms"] for r in runs]),
-               "tokens": np.mean([r.get("mean_tokens", np.nan) for r in runs])}
+               "tokens": np.mean([r.get("mean_tokens", np.nan) for r in runs]),
+               "nominal": _frac_nominal(runs),
+               "ade_nom": _mean_or_nan(runs, "mean_min_ade_nominal"),
+               "ade_rsn": _mean_or_nan(runs, "mean_min_ade_reasoned"),
+               "ms_nom": _mean_or_nan(runs, "mean_ms_nominal"),
+               "ms_rsn": _mean_or_nan(runs, "mean_ms_reasoned")}
         for s in STAGES:
             row[s] = np.mean([r.get("stage_ms", {}).get(s, 0.0) for r in runs])
         rows.append(row)
 
     cols = ["model", "mode", "cot", "traj", "clips", "windows", "min_ade", "ade", "mean_ms",
-            "median_ms", "p90_ms", "tokens", *STAGES]
+            "median_ms", "p90_ms", "tokens", "nominal", "ade_nom", "ade_rsn", "ms_nom", "ms_rsn",
+            *STAGES]
     widths = {c: max(len(c), *(len(_fmt(r[c])) for r in rows)) for c in cols} if rows else {}
     print("  ".join(c.rjust(widths[c]) for c in cols))
     for r in rows:
@@ -73,6 +81,20 @@ def main() -> None:
             w.writeheader()
             w.writerows({c: _fmt(r[c]) for c in cols} for r in rows)
         print(f"wrote {args.csv}")
+
+
+def _frac_nominal(runs: list) -> float:
+    """Fraction of windows the model answered <NOMINAL> (Edge's adaptive reasoning); nan if the
+    runs predate that field (flashdrive, older Edge results)."""
+    nom = [r["n_nominal"] for r in runs if "n_nominal" in r]
+    if not nom:
+        return np.nan
+    return float(sum(nom) / sum(r["n"] for r in runs if "n_nominal" in r))
+
+
+def _mean_or_nan(runs: list, key: str) -> float:
+    vals = [r[key] for r in runs if r.get(key) is not None]
+    return float(np.mean(vals)) if vals else np.nan
 
 
 def _fmt(v) -> str:

@@ -112,6 +112,16 @@ results/Alpamayo2-Edge/cot_test/<condition>/<clip>/figs/tuned_<clip8>.png
 gives the plain benchmark with 1 and 6 candidates. `summarize.py` shows a `cot` column and
 `missing_clips.py --condition empty` checks one condition.
 
+**`<NOMINAL>`.** Edge's adaptive reasoning: when the model decides the scene needs no
+explanation it writes the single token `<NOMINAL>` and goes straight to the trajectory, which
+is the model's own empty condition. A window's CoT is therefore either `<NOMINAL>` or a
+chain of causation. Each result records `n_nominal`, a per-window `nominal` flag and minADE /
+latency split by it, and `summarize.py` shows them as `nominal` (fraction of windows),
+`ade_nom` / `ade_rsn` and `ms_nom` / `ms_rsn`: full vs empty is only informative on the
+reasoned windows. Every window is seeded with `--seed` + window index (same seed for both
+conditions of a window, different draws across windows); a fixed seed per window would turn
+the reason-or-not choice into a constant threshold and give long runs of one or the other.
+
 ### Window cache
 
 Streaming a window from Hugging Face decodes 22 frames from six camera videos, so loading a
