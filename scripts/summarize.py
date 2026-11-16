@@ -26,21 +26,28 @@ def main() -> None:
     ap.add_argument("--csv", default=None, help="also write the table here")
     args = ap.parse_args()
 
-    files = args.files or sorted(glob.glob(os.path.join("results", "*", "*.json")))
+    files = args.files or sorted(glob.glob(os.path.join("results", "*", "*.json"))
+                                 + glob.glob(os.path.join("results", "*", "cot_test", "*", "*",
+                                                          "*.json")))
     groups = collections.defaultdict(list)
     for path in files + list(args.compare):
         with open(path) as fh:
             d = json.load(fh)
         if "mean_ms" not in d:
             continue
-        model = os.path.basename(os.path.dirname(path))
+        parts = os.path.abspath(path).split(os.sep)
+        if "cot_test" in parts:  # results/<model>/cot_test/<condition>/<clip>/<run>.json
+            i = parts.index("cot_test")
+            model, condition = parts[i - 1], parts[i + 1]
+        else:
+            model, condition = os.path.basename(os.path.dirname(path)), "-"
         s = d.get("settings", {})
         traj = s.get("num_traj_sets", 1) * s.get("num_traj_samples", 1)
-        groups[(model, d.get("mode") or d.get("step"), traj)].append(d)
+        groups[(model, d.get("mode") or d.get("step"), condition, traj)].append(d)
 
     rows = []
-    for (model, mode, traj), runs in sorted(groups.items()):
-        row = {"model": model, "mode": mode, "traj": traj, "clips": len(runs),
+    for (model, mode, condition, traj), runs in sorted(groups.items()):
+        row = {"model": model, "mode": mode, "cot": condition, "traj": traj, "clips": len(runs),
                "windows": int(sum(r["n"] for r in runs)),
                "min_ade": np.mean([r["mean_min_ade"] for r in runs]),
                "ade": np.mean([r.get("mean_ade", r["mean_min_ade"]) for r in runs]),
@@ -52,7 +59,7 @@ def main() -> None:
             row[s] = np.mean([r.get("stage_ms", {}).get(s, 0.0) for r in runs])
         rows.append(row)
 
-    cols = ["model", "mode", "traj", "clips", "windows", "min_ade", "ade", "mean_ms",
+    cols = ["model", "mode", "cot", "traj", "clips", "windows", "min_ade", "ade", "mean_ms",
             "median_ms", "p90_ms", "tokens", *STAGES]
     widths = {c: max(len(c), *(len(_fmt(r[c])) for r in rows)) for c in cols} if rows else {}
     print("  ".join(c.rjust(widths[c]) for c in cols))

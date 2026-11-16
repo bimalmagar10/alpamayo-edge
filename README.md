@@ -15,8 +15,11 @@ infer_edge/timing.py      CUDA-event stage timers hooked on the model's own call
 scripts/infer.py          the benchmark (one clip, one mode)
 scripts/download_clips.py pre-fill the window cache for N clips (no GPU needed)
 scripts/plot_results.py   figure per run: per-stage latency, latency per window, minADE / ADE (infer.py calls it)
-scripts/run_clips.sh      infer.py over the first N eval clips x modes, then summarize
+scripts/run_clips.sh      infer.py over the eval set (644 clips), shardable over nodes
+scripts/missing_clips.py  which eval clips have no finished result yet
 scripts/summarize.py      one table over results/ (and flashdrive's result files, if wanted)
+scripts/dissect_checkpoint.py  layers / widths / heads / params of a checkpoint from its config and tensor shapes
+scripts/plot_architecture.py   NeurIPS-style block diagram of Alpamayo 1.5 vs Alpamayo 2 Edge (pdf + png)
 results/<model>/          <mode>_<clip8>_n<k>.json, _reference.npy (pred xy), _gt.npy; figures/<mode>_<clip8>.png + .csv
 ```
 
@@ -51,7 +54,8 @@ python scripts/infer.py --attn flash_attention_2            # eager with FlashAt
 python scripts/infer.py --num-traj-samples 1                # one candidate count only (default runs 1 and 6)
 python scripts/plot_results.py results/Alpamayo2-Edge/tuned_87147a1b_n*.json   # redraw a figure
 python scripts/infer.py --nav-text "Go straight"            # fixed instruction instead of the oracle
-bash scripts/run_clips.sh                                   # 10 clips x {eager, tuned}; NUM_CLIPS=100 MODES=... to change
+SHARD=0 NSHARDS=4 bash scripts/run_clips.sh                 # the 644 eval clips, --mode tuned, node 1 of 4 (see below)
+python scripts/missing_clips.py --mode tuned                # which clips still have no result
 python scripts/summarize.py                                 # table over results/
 python scripts/summarize.py --compare ../rt-alapamyo/h100/flashdrive/results/*/*.json
 ```
@@ -66,6 +70,47 @@ minADE is the best candidate's ADE and ADE the mean candidate's; with one candid
 are equal. At the end `scripts/plot_results.py` draws
 `results/<model>/figures/<mode>_<clip8>.png` (per-stage latency per count, latency per
 window, minADE / ADE per count) and the same numbers as a `.csv`. `--no-plot` skips it.
+
+### The whole eval set
+
+`infer.py` takes many clips in one process (`--clip-id a b ...`, `--clip-list file`, or the
+first `--num-clips` of `$EDGE_METADB` split with `--shard k --nshards n`): the model is
+loaded and compiled once, the next clip's windows stream in a background thread while the
+GPU runs the current clip, clips whose result files already exist are skipped, and a clip
+that fails is logged in `results/<model>/sweep.log` without stopping the rest.
+`scripts/run_clips.sh` wraps that per node:
+
+```bash
+SHARD=0 NSHARDS=4 bash scripts/run_clips.sh     # node 1 ... SHARD=3 on node 4; logs in $EDGE_ROOT/logs
+python scripts/missing_clips.py --mode tuned --out missing.txt   # after all shards: anything left?
+CLIP_LIST=missing.txt bash scripts/run_clips.sh                  # rerun just those
+python scripts/summarize.py                                      # mean over clips per mode / count
+```
+
+With more than one clip the window cache is read but never written (`--cache-read-only`):
+644 clips x 117 windows is about 900 GB of windows. Per clip expect the streaming time of 117
+windows (hidden behind the previous clip's inference once the pipeline is full) plus two passes
+of 117 windows on the GPU, one per candidate count.
+
+### CoT test: full vs empty reasoning
+
+The flashdrive CoT test, on Edge. `--cot-condition full empty` runs every clip twice on the
+same windows and seeds: `full` lets the model write its own chain of causation, `empty`
+forces `<|traj_future_start|>` as the first token (NVIDIA's own mask processor, so tuned
+mode stays on its graphs) and the action expert plans from the prompt alone, the model's
+zero-length adaptive-reasoning case. One candidate by default. Outputs follow flashdrive's
+layout so its `plot_cot_summary.py` / `plot_cot_reasoning.py` read them unchanged:
+
+```
+results/Alpamayo2-Edge/cot_test/<condition>/<clip>/tuned_<clip8>.json        metrics + per-window arrays
+results/Alpamayo2-Edge/cot_test/<condition>/<clip>/tuned_<clip8>_cot.json    every window's CoT ids + text
+results/Alpamayo2-Edge/cot_test/<condition>/<clip>/tuned_<clip8>_{reference,gt}.npy
+results/Alpamayo2-Edge/cot_test/<condition>/<clip>/figs/tuned_<clip8>.png
+```
+
+`run_clips.sh` runs the CoT test by default (`CONDITIONS="full empty"`); `CONDITIONS=""`
+gives the plain benchmark with 1 and 6 candidates. `summarize.py` shows a `cot` column and
+`missing_clips.py --condition empty` checks one condition.
 
 ### Window cache
 
@@ -104,6 +149,20 @@ syncs). `--mode compile/tuned` compile and capture graphs on the first window; k
 later processes reuse the kernels. A changed prompt length across a 256-token bucket (possible
 with the oracle nav text) or a changed candidate count builds new graphs mid-run; the JSON's
 `acceleration.builds` lists them.
+
+## Checkpoint anatomy
+
+`scripts/dissect_checkpoint.py` prints every transformer declared in a checkpoint's
+`config.json` (layers, hidden size, heads, KV heads, head dim, FFN, vocab) and, independently,
+the same numbers derived from the safetensors tensor shapes, with parameter counts per
+component. It reads only the config and shard headers, so it works on a Hub repo without
+downloading weights, or on `$EDGE_MODEL`. The reports for both released models are in
+`docs/checkpoint-dissection/`.
+
+```bash
+python scripts/dissect_checkpoint.py                                  # $EDGE_MODEL
+python scripts/dissect_checkpoint.py --model nvidia/Alpamayo-1.5-10B --json a15.json
+```
 
 ## Tests NVIDIA ships
 

@@ -102,12 +102,13 @@ def load_window(
     cache_dir: str | None = None,
     resize_to_model: bool = True,
     factor: int = TOKEN_PX,
+    write_cache: bool = True,
 ) -> dict[str, Any]:
     """The raw Edge sample of (clip, t0) with ``ego_future_xyz`` [1, 64, 3] and
     ``ego_future_rot`` [1, 64, 3, 3] added.
 
     With ``cache_dir``, reads the window's .npz when it exists and writes it after streaming
-    otherwise. ``nav_text`` None means the oracle instruction (``oracle_nav_text``); the text
+    otherwise (``write_cache`` False: reads only, for sweeps the cache cannot hold). ``nav_text`` None means the oracle instruction (``oracle_nav_text``); the text
     is never cached. ``resize_to_model`` stores frames at the model's input size (11x less
     disk than 1080p); see ``resize_frames`` for what that changes.
     """
@@ -128,7 +129,7 @@ def load_window(
         data["ego_future_rot"] = torch.from_numpy(rot)[None]
         if resize_to_model:
             data["image_frames"] = resize_frames(data["image_frames"], factor)
-        if path:
+        if path and write_cache:
             os.makedirs(cache_dir, exist_ok=True)
             with open(path + ".part", "wb") as fh:  # np.savez appends ".npz" to a bare path
                 np.savez(fh, **{k: data[k].numpy() for k in TENSORS})
